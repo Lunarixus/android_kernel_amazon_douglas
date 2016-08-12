@@ -214,8 +214,10 @@ enum {
 	BINDER_DEBUG_PRIORITY_CAP = 1U << 14,
 	BINDER_DEBUG_BUFFER_ALLOC_ASYNC = 1U << 15,
 };
+
 static uint32_t binder_debug_mask = BINDER_DEBUG_USER_ERROR |
 BINDER_DEBUG_FAILED_TRANSACTION | BINDER_DEBUG_DEAD_TRANSACTION;
+static uint32_t binder_debug_mask = 0;
 module_param_named(debug_mask, binder_debug_mask, uint, S_IWUSR | S_IRUGO);
 
 static bool binder_debug_no_lock;
@@ -2222,13 +2224,6 @@ static int binder_dec_ref(struct binder_ref *ref, int strong)
 			     ref->proc->pid, ref->debug_id, ref->desc, ref->strong, ref->weak);
 			return -EINVAL;
 		}
-<<<<<<< HEAD
-		ref->weak--;
-	}
-	if (ref->strong == 0 && ref->weak == 0)
-		binder_delete_ref(ref);
-	return 0;
-=======
 		ref->data.weak--;
 	}
 	if (ref->data.strong == 0 && ref->data.weak == 0) {
@@ -2488,7 +2483,6 @@ static struct binder_thread *binder_get_txn_from(
 		atomic_inc(&from->tmp_ref);
 	spin_unlock(&t->lock);
 	return from;
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 }
 
 static void binder_pop_transaction(struct binder_thread *target_thread,
@@ -2503,14 +2497,7 @@ static void binder_pop_transaction(struct binder_thread *target_thread,
 	t->need_reply = 0;
 	if (t->buffer)
 		t->buffer->transaction = NULL;
-<<<<<<< HEAD
-#ifdef BINDER_MONITOR
-	binder_cancel_bwdog(t);
-#endif
-	kfree(t);
-=======
 	kmem_cache_free(binder_transaction_pool, t);
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 	binder_stats_deleted(BINDER_STAT_TRANSACTION);
 }
 
@@ -3416,14 +3403,7 @@ err_binder_alloc_buf_failed:
 	kmem_cache_free(binder_work_pool, tcomplete);
 	binder_stats_deleted(BINDER_STAT_TRANSACTION_COMPLETE);
 err_alloc_tcomplete_failed:
-<<<<<<< HEAD
-#ifdef BINDER_MONITOR
-	binder_cancel_bwdog(t);
-#endif
-	kfree(t);
-=======
 	kmem_cache_free(binder_transaction_pool, t);
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 	binder_stats_deleted(BINDER_STAT_TRANSACTION);
 err_alloc_t_failed:
 err_bad_call_stack:
@@ -3700,9 +3680,6 @@ static int binder_thread_write(struct binder_proc *proc,
 			if (get_user(cookie, (binder_uintptr_t __user *) ptr))
 				return -EFAULT;
 			ptr += sizeof(binder_uintptr_t);
-<<<<<<< HEAD
-			ref = binder_get_ref(proc, target, false);
-=======
 			if (cmd == BC_REQUEST_DEATH_NOTIFICATION) {
 				/*
 				 * Allocate memory for death notification
@@ -3726,21 +3703,16 @@ static int binder_thread_write(struct binder_proc *proc,
 			}
 			binder_proc_lock(proc);
 			ref = binder_get_ref_olocked(proc, target, false);
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 			if (ref == NULL) {
 				binder_user_error("%d:%d %s invalid ref %d\n",
 					proc->pid, thread->pid,
 					cmd == BC_REQUEST_DEATH_NOTIFICATION ?
 					"BC_REQUEST_DEATH_NOTIFICATION" :
-<<<<<<< HEAD
-					"BC_CLEAR_DEATH_NOTIFICATION", target);
-=======
 					"BC_CLEAR_DEATH_NOTIFICATION",
 					target);
 				binder_proc_unlock(proc);
 				if (death)
 					kmem_cache_free(binder_ref_death_pool, death);
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 				break;
 			}
 #ifdef MTK_DEATH_NOTIFY_MONITOR
@@ -3774,20 +3746,9 @@ static int binder_thread_write(struct binder_proc *proc,
 				if (ref->death) {
 					binder_user_error("%d:%d BC_REQUEST_DEATH_NOTIFICATION death notification already set\n",
 						proc->pid, thread->pid);
-<<<<<<< HEAD
-					break;
-				}
-				death = kzalloc(sizeof(*death), GFP_KERNEL);
-				if (death == NULL) {
-					thread->return_error = BR_ERROR;
-					binder_debug(BINDER_DEBUG_FAILED_TRANSACTION,
-						     "%d:%d BC_REQUEST_DEATH_NOTIFICATION failed\n",
-						     proc->pid, thread->pid);
-=======
 					binder_node_unlock(ref->node);
 					binder_proc_unlock(proc);
 					kmem_cache_free(binder_ref_death_pool, death);
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 					break;
 				}
 				binder_stats_created(BINDER_STAT_DEATH);
@@ -4049,22 +4010,6 @@ retry:
 			binder_cancel_bwdog(t);
 #endif
 		} break;
-<<<<<<< HEAD
-		case BINDER_WORK_TRANSACTION_COMPLETE:{
-				cmd = BR_TRANSACTION_COMPLETE;
-				if (put_user(cmd, (uint32_t __user *) ptr))
-					return -EFAULT;
-				ptr += sizeof(uint32_t);
-
-				binder_stat_br(proc, thread, cmd);
-				binder_debug(BINDER_DEBUG_TRANSACTION_COMPLETE,
-					     "%d:%d BR_TRANSACTION_COMPLETE\n",
-					     proc->pid, thread->pid);
-
-				list_del(&w->entry);
-				kfree(w);
-				binder_stats_deleted(BINDER_STAT_TRANSACTION_COMPLETE);
-=======
 		case BINDER_WORK_RETURN_ERROR: {
 			struct binder_error *e = container_of(
 					w, struct binder_error, work);
@@ -4115,7 +4060,6 @@ retry:
 				node->has_weak_ref = 1;
 				node->pending_weak_ref = 1;
 				node->local_weak_refs++;
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 			}
 			break;
 		case BINDER_WORK_NODE:{
@@ -4249,16 +4193,6 @@ retry:
 					     "BR_CLEAR_DEATH_NOTIFICATION_DONE",
 					     (u64) death->cookie);
 
-<<<<<<< HEAD
-				if (w->type == BINDER_WORK_CLEAR_DEATH_NOTIFICATION) {
-					list_del(&w->entry);
-					kfree(death);
-					binder_stats_deleted(BINDER_STAT_DEATH);
-				} else
-					list_move(&w->entry, &proc->delivered_death);
-				if (cmd == BR_DEAD_BINDER)
-					goto done;	/* DEAD_BINDER notifications can cause transactions */
-=======
 			binder_debug(BINDER_DEBUG_DEATH_NOTIFICATION,
 				     "%d:%d %s %016llx\n",
 				      proc->pid, thread->pid,
@@ -4274,7 +4208,6 @@ retry:
 				binder_enqueue_work_ilocked(
 						w, &proc->delivered_death);
 				binder_inner_proc_unlock(proc);
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 			}
 			break;
 		}
@@ -4425,31 +4358,6 @@ static void binder_release_work(struct list_head *list)
 		case BINDER_WORK_TRANSACTION:{
 				struct binder_transaction *t;
 
-<<<<<<< HEAD
-				t = container_of(w, struct binder_transaction, work);
-				if (t->buffer->target_node && !(t->flags & TF_ONE_WAY)) {
-					binder_send_failed_reply(t, BR_DEAD_REPLY);
-				} else {
-					binder_debug
-					    (BINDER_DEBUG_DEAD_TRANSACTION,
-					     "undelivered transaction %d\n", t->debug_id);
-					t->buffer->transaction = NULL;
-#ifdef BINDER_MONITOR
-					binder_cancel_bwdog(t);
-#endif
-					kfree(t);
-					binder_stats_deleted(BINDER_STAT_TRANSACTION);
-				}
-			}
-			break;
-		case BINDER_WORK_TRANSACTION_COMPLETE:{
-				binder_debug(BINDER_DEBUG_DEAD_TRANSACTION,
-					     "undelivered TRANSACTION_COMPLETE\n");
-				kfree(w);
-				binder_stats_deleted(BINDER_STAT_TRANSACTION_COMPLETE);
-			}
-			break;
-=======
 			binder_debug(BINDER_DEBUG_DEAD_TRANSACTION,
 				"undelivered TRANSACTION_ERROR: %u\n",
 				e->cmd);
@@ -4460,20 +4368,10 @@ static void binder_release_work(struct list_head *list)
 			kmem_cache_free(binder_work_pool, w);
 			binder_stats_deleted(BINDER_STAT_TRANSACTION_COMPLETE);
 		} break;
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 		case BINDER_WORK_DEAD_BINDER_AND_CLEAR:
 		case BINDER_WORK_CLEAR_DEATH_NOTIFICATION:{
 				struct binder_ref_death *death;
 
-<<<<<<< HEAD
-				death = container_of(w, struct binder_ref_death, work);
-				binder_debug(BINDER_DEBUG_DEAD_TRANSACTION,
-					     "undelivered death notification, %016llx\n",
-					     (u64) death->cookie);
-				kfree(death);
-				binder_stats_deleted(BINDER_STAT_DEATH);
-			} break;
-=======
 			death = container_of(w, struct binder_ref_death, work);
 			binder_debug(BINDER_DEBUG_DEAD_TRANSACTION,
 				"undelivered death notification, %016llx\n",
@@ -4481,7 +4379,6 @@ static void binder_release_work(struct list_head *list)
 			kmem_cache_free(binder_ref_death_pool, death);
 			binder_stats_deleted(BINDER_STAT_DEATH);
 		} break;
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 		default:
 			pr_err("unexpected work type, %d, not freed\n", w->type);
 			break;
@@ -4507,22 +4404,6 @@ static struct binder_thread *binder_get_thread(struct binder_proc *proc)
 		else
 			break;
 	}
-<<<<<<< HEAD
-	if (*p == NULL) {
-		thread = kzalloc(sizeof(*thread), GFP_KERNEL);
-		if (thread == NULL)
-			return NULL;
-		binder_stats_created(BINDER_STAT_THREAD);
-		thread->proc = proc;
-		thread->pid = current->pid;
-		init_waitqueue_head(&thread->wait);
-		INIT_LIST_HEAD(&thread->todo);
-		rb_link_node(&thread->rb_node, parent, p);
-		rb_insert_color(&thread->rb_node, &proc->threads);
-		thread->looper |= BINDER_LOOPER_STATE_NEED_RETURN;
-		thread->return_error = BR_OK;
-		thread->return_error2 = BR_OK;
-=======
 	if (!new_thread)
 		return NULL;
 	thread = new_thread;
@@ -4562,14 +4443,10 @@ static struct binder_thread *binder_get_thread(struct binder_proc *proc)
 		binder_inner_proc_unlock(proc);
 		if (thread != new_thread)
 			kmem_cache_free(binder_thread_pool, new_thread);
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 	}
 	return thread;
 }
 
-<<<<<<< HEAD
-static int binder_free_thread(struct binder_proc *proc, struct binder_thread *thread)
-=======
 static void binder_free_proc(struct binder_proc *proc)
 {
 	BUG_ON(!list_empty(&proc->todo));
@@ -4591,7 +4468,6 @@ static void binder_free_thread(struct binder_thread *thread)
 
 static int binder_thread_release(struct binder_proc *proc,
 				 struct binder_thread *thread)
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 {
 	struct binder_transaction *t;
 	struct binder_transaction *send_reply = NULL;
@@ -6378,15 +6254,6 @@ static int binder_page_used_show(struct seq_file *s, void *p)
 	return 0;
 }
 
-<<<<<<< HEAD
-BINDER_DEBUG_ENTRY(page_used);
-#endif
-
-BINDER_DEBUG_ENTRY(state);
-BINDER_DEBUG_ENTRY(stats);
-BINDER_DEBUG_ENTRY(transactions);
-BINDER_DEBUG_ENTRY(transaction_log);
-=======
 static int __init binder_create_pools(void)
 {
 	int ret;
@@ -6453,7 +6320,6 @@ static void __init binder_destroy_pools(void)
 	kmem_cache_destroy(binder_transaction_pool);
 	kmem_cache_destroy(binder_work_pool);
 }
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 
 static int __init binder_init(void)
 {
@@ -6461,40 +6327,11 @@ static int __init binder_init(void)
 #ifdef BINDER_MONITOR
 	struct task_struct *th;
 
-<<<<<<< HEAD
-	th = kthread_create(binder_bwdog_thread, NULL, "binder_watchdog");
-	if (IS_ERR(th))
-		pr_err("fail to create watchdog thread " "(err:%li)\n", PTR_ERR(th));
-	else
-		wake_up_process(th);
-
-	binder_transaction_log_failed.entry = &entry_failed[0];
-	binder_transaction_log_failed.size = ARRAY_SIZE(entry_failed);
-
-#ifdef CONFIG_MTK_EXTMEM
-	binder_transaction_log.entry =
-	    extmem_malloc_page_align(sizeof(struct binder_transaction_log_entry)
-				     * MAX_ENG_TRANS_LOG_BUFF_LEN);
-	binder_transaction_log.size = MAX_ENG_TRANS_LOG_BUFF_LEN;
-
-	if (binder_transaction_log.entry == NULL) {
-		pr_err("%s[%s] ext emory alloc failed!!!\n", __FILE__, __func__);
-		binder_transaction_log.entry =
-		    vmalloc(sizeof(struct binder_transaction_log_entry) *
-			    MAX_ENG_TRANS_LOG_BUFF_LEN);
-	}
-#else
-	binder_transaction_log.entry = &entry_t[0];
-	binder_transaction_log.size = ARRAY_SIZE(entry_t);
-#endif
-#endif
-=======
 	ret = binder_create_pools();
 	if (ret)
 		return ret;
 
 	binder_alloc_shrinker_init();
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 
 	binder_deferred_workqueue = create_singlethread_workqueue("binder");
 	if (!binder_deferred_workqueue)
@@ -6553,8 +6390,6 @@ static int __init binder_init(void)
 				    binder_debugfs_dir_entry_root, NULL, &binder_page_used_fops);
 #endif
 	}
-<<<<<<< HEAD
-=======
 err_alloc_device_names_failed:
 	debugfs_remove_recursive(binder_debugfs_dir_entry_root);
 
@@ -6562,7 +6397,6 @@ err_alloc_device_names_failed:
 err_workqueue_init_failed:
 	binder_destroy_pools();
 
->>>>>>> 72011fd... binder: Reserve caches for small, high-frequency memory allocations
 	return ret;
 }
 
