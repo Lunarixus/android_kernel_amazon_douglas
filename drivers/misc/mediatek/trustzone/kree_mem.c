@@ -239,6 +239,34 @@ TZ_RESULT KREE_AllocSecurechunkmem(KREE_SESSION_HANDLE session,
 	return ret;
 }
 
+TZ_RESULT KREE_AllocSecurechunkmemWithTag(KREE_SESSION_HANDLE session,
+					KREE_SECUREMEM_HANDLE *cm_handle,
+					uint32_t alignment,
+					uint32_t size, const char *tag)
+{
+	TZ_RESULT ret;
+
+	ret =
+	    _allocFunc(TZCMD_MEM_SECURECM_ALLOC_WITH_TAG, session, cm_handle,
+			alignment, size, "KREE_AllocSecurechunkmem");
+
+	return ret;
+}
+
+TZ_RESULT KREE_ZallocSecurechunkmemWithTag(KREE_SESSION_HANDLE session,
+					KREE_SECUREMEM_HANDLE *cm_handle,
+					uint32_t alignment,
+					uint32_t size, const char *tag)
+{
+	TZ_RESULT ret;
+
+	ret =
+	    _allocFunc(TZCMD_MEM_SECURECM_ZALLOC_WITH_TAG, session, cm_handle,
+			alignment, size, "KREE_ZallocSecurechunkmem");
+
+	return ret;
+}
+
 TZ_RESULT KREE_ReferenceSecurechunkmem(KREE_SESSION_HANDLE session,
 					KREE_SECURECM_HANDLE cm_handle)
 {

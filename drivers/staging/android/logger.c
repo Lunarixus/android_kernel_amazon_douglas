@@ -30,9 +30,6 @@
 #include <linux/vmalloc.h>
 #include <linux/aio.h>
 #include <linux/irq_work.h>
-#ifdef CONFIG_AMAZON_KLOG_CONSOLE_TRYLOCK
-#include <linux/ring_buffer.h>
-#endif
 #include "logger.h"
 
 #include <asm/ioctls.h>
@@ -58,6 +55,8 @@ module_param_named(fake_read, s_fake_read, int, 0660);
  * @wq:		The wait queue for @readers
  * @readers:	This log's readers
  * @mutex:	The mutex that protects the @buffer
+ * @sem:    The semphore that protects the kernel @buffer
+ * @is_mutex: mutex or semphore flag.
  * @w_off:	The current write head offset
  * @head:	The head, or location that readers start reading at.
  * @size:	The size of the log
@@ -72,15 +71,57 @@ struct logger_log {
 	struct miscdevice	misc;
 	wait_queue_head_t	wq;
 	struct list_head	readers;
+#ifdef CONFIG_AMAZON_KLOG_CONSOLE
+	union {
+		struct mutex		mutex;
+		struct semaphore	sem;
+	};
+	int is_mutex;
+#else
 	struct mutex		mutex;
+#endif
 	size_t			w_off;
 	size_t			head;
 	size_t			size;
 	struct list_head	logs;
 };
 
-static LIST_HEAD(log_list);
+#ifdef CONFIG_AMAZON_KLOG_CONSOLE
+#define logger_lock(log) \
+	do { \
+		if(log->is_mutex) \
+			mutex_lock(&log->mutex); \
+		else \
+			down(&log->sem); \
+	} while(0)
 
+#define logger_unlock(log) \
+	do { \
+		if(log->is_mutex) \
+			mutex_unlock(&log->mutex); \
+		else \
+			up(&log->sem); \
+	} while(0)
+
+#define init_logger_lock(log) \
+	do { \
+		if(log->is_mutex) \
+			mutex_init(&log->mutex); \
+		else \
+			sema_init(&log->sem, 1); \
+	} while(0)
+
+#else
+
+#define logger_lock(log) mutex_lock(&log->mutex)
+
+#define logger_unlock(log) mutex_unlock(&log->mutex);
+
+#define init_logger_lock(log) mutex_init(&log->mutex);
+
+#endif
+
+static LIST_HEAD(log_list);
 
 /**
  * struct logger_reader - a logging device open for reading
@@ -281,13 +322,13 @@ static size_t get_next_entry_by_uid(struct logger_log *log,
 	return off;
 }
 
-static ssize_t logger_fake_message(struct logger_log *log, struct logger_reader *reader, char __user *buf, const char *fmt, ...) 
+static ssize_t logger_fake_message(struct logger_log *log, struct logger_reader *reader, char __user *buf, const char *fmt, ...)
 {
 	int len, header_size, entry_len;
         char message[256], *tag;
 	va_list ap;
 	struct logger_entry *current_entry, scratch;
-	
+
 	header_size = get_user_hdr_len(reader->r_ver);
 
 	current_entry = get_entry_header(log, reader->r_off, &scratch);
@@ -355,12 +396,12 @@ static ssize_t logger_read(struct file *file, char __user *buf,
 
 start:
 	while (1) {
-		mutex_lock(&log->mutex);
+		logger_lock(log);
 
 		prepare_to_wait(&log->wq, &wait, TASK_INTERRUPTIBLE);
 
 		ret = (log->w_off == reader->r_off);
-		mutex_unlock(&log->mutex);
+		logger_unlock(log);
 		if (!ret)
 			break;
 
@@ -381,7 +422,7 @@ start:
 	if (ret)
 		return ret;
 
-	mutex_lock(&log->mutex);
+	logger_lock(log);
 
 	if (!reader->r_all)
 		reader->r_off = get_next_entry_by_uid(log,
@@ -389,7 +430,7 @@ start:
 
 	/* is there still something to read or did we race? */
 	if (unlikely(log->w_off == reader->r_off)) {
-		mutex_unlock(&log->mutex);
+		logger_unlock(log);
 		goto start;
 	}
 
@@ -417,7 +458,7 @@ start:
 	ret = do_read_log_to_user(log, reader, buf, ret);
 
 out:
-	mutex_unlock(&log->mutex);
+	logger_unlock(log);
 
 	return ret;
 }
@@ -582,7 +623,7 @@ static ssize_t logger_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	if (unlikely(!header.len))
 		return 0;
 
-	mutex_lock(&log->mutex);
+	logger_lock(log);
 
 	orig = log->w_off;
 
@@ -607,7 +648,7 @@ static ssize_t logger_aio_write(struct kiocb *iocb, const struct iovec *iov,
 		nr = do_write_log_from_user(log, iov->iov_base, len);
 		if (unlikely(nr < 0)) {
 			log->w_off = orig;
-			mutex_unlock(&log->mutex);
+			logger_unlock(log);
 			return nr;
 		}
 
@@ -615,7 +656,7 @@ static ssize_t logger_aio_write(struct kiocb *iocb, const struct iovec *iov,
 		ret += nr;
 	}
 
-	mutex_unlock(&log->mutex);
+	logger_unlock(log);
 
 	/* wake up any blocked readers */
 	wake_up_interruptible(&log->wq);
@@ -682,10 +723,10 @@ static int logger_open(struct inode *inode, struct file *file)
 
 		INIT_LIST_HEAD(&reader->list);
 
-		mutex_lock(&log->mutex);
+		logger_lock(log);
 		reader->r_off = log->head;
 		list_add_tail(&reader->list, &log->readers);
-		mutex_unlock(&log->mutex);
+		logger_unlock(log);
 
 		file->private_data = reader;
 	} else
@@ -705,9 +746,9 @@ static int logger_release(struct inode *ignored, struct file *file)
 		struct logger_reader *reader = file->private_data;
 		struct logger_log *log = reader->log;
 
-		mutex_lock(&log->mutex);
+		logger_lock(log);
 		list_del(&reader->list);
-		mutex_unlock(&log->mutex);
+		logger_unlock(log);
 
 		kfree(reader);
 	}
@@ -738,14 +779,14 @@ static unsigned int logger_poll(struct file *file, poll_table *wait)
 
 	poll_wait(file, &log->wq, wait);
 
-	mutex_lock(&log->mutex);
+	logger_lock(log);
 	if (!reader->r_all)
 		reader->r_off = get_next_entry_by_uid(log,
 			reader->r_off, current_euid());
 
 	if (log->w_off != reader->r_off)
 		ret |= POLLIN | POLLRDNORM;
-	mutex_unlock(&log->mutex);
+	logger_unlock(log);
 
 	return ret;
 }
@@ -770,7 +811,7 @@ static long logger_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	long ret = -EINVAL;
 	void __user *argp = (void __user *) arg;
 
-	mutex_lock(&log->mutex);
+	logger_lock(log);
 
 	switch (cmd) {
 	case LOGGER_GET_LOG_BUF_SIZE:
@@ -837,7 +878,7 @@ static long logger_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		break;
 	}
 
-	mutex_unlock(&log->mutex);
+	logger_unlock(log);
 
 	return ret;
 }
@@ -878,7 +919,7 @@ static void logger_kernel_write(struct logger_log *log, const struct iovec *iov,
 	if (unlikely(!header.len))
 		return;
 
-	mutex_lock(&log->mutex);
+	logger_lock(log);
 
 	/*
 	 * Fix up any readers, pulling them forward to the first readable
@@ -905,136 +946,11 @@ static void logger_kernel_write(struct logger_log *log, const struct iovec *iov,
 		total_len += len;
 	}
 
-	mutex_unlock(&log->mutex);
+	logger_unlock(log);
 
 	/* wake up any blocked readers */
 	wake_up_interruptible(&log->wq);
 }
-
-#ifdef CONFIG_AMAZON_METRICS_LOG
-void log_to_metrics(enum android_log_priority priority,
-	const char *domain, char *log_msg)
-{
-	static struct logger_log *log;
-	char *p = log_msg;
-
-	if (log == NULL) {
-		struct logger_log *t;
-		list_for_each_entry(t, &log_list, logs)
-			if (strncmp(t->misc.name, LOGGER_LOG_METRICS, strlen(LOGGER_LOG_METRICS)) == 0)
-				log = t;
-	}
-
-	if (metrics_init != 0 && log_msg != NULL) {
-		struct iovec vec[3];
-
-		if (domain == NULL)
-			domain = "kernel";
-
-		while (*p != '\0') {
-			if (' ' == *p)
-				*p = '_';
-			p++;
-		}
-
-		vec[0].iov_base = (unsigned char *)&priority;
-		vec[0].iov_len  = 1;
-
-		vec[1].iov_base = (void *)domain;
-		vec[1].iov_len  = strlen(domain) + 1;
-
-		vec[2].iov_base = (void *)log_msg;
-		vec[2].iov_len  = strlen(log_msg) + 1;
-
-		logger_kernel_write(log, vec, 3);
-	}
-}
-
-void log_to_vitals(enum android_log_priority priority,
-	const char *domain, const char *log_msg)
-{
-	static struct logger_log *log;
-
-	if (log == NULL) {
-		struct logger_log *t;
-		list_for_each_entry(t, &log_list, logs)
-			if (strncmp(t->misc.name, LOGGER_LOG_AMAZON_VITALS, strlen(LOGGER_LOG_AMAZON_VITALS)) == 0)
-				log = t;
-	}
-
-	if (metrics_init != 0 && log_msg != NULL) {
-		struct iovec vec[3];
-
-		if (domain == NULL)
-			domain = "kernel";
-
-		vec[0].iov_base = (unsigned char *)&priority;
-		vec[0].iov_len  = 1;
-
-		vec[1].iov_base = (void *)domain;
-		vec[1].iov_len  = strlen(domain) + 1;
-
-		vec[2].iov_base = (void *)log_msg;
-		vec[2].iov_len  = strlen(log_msg) + 1;
-
-		logger_kernel_write(log, vec, 3);
-	}
-}
-void log_counter_to_vitals(enum android_log_priority priority,
-			const char *domain, const char *program,
-			const char *source, const char *key,
-			long counter_value, const char *unit,
-			const char *metadata, vitals_type type)
-{
-	char str[VITAL_ENTRY_MAX_PAYLOAD];
-	char metadata_msg[VITAL_ENTRY_MAX_PAYLOAD];
-
-	if (metadata != NULL && strlen(metadata))
-		snprintf(metadata_msg, VITAL_ENTRY_MAX_PAYLOAD,
-				 ",metadata=%s;DV;1", metadata);
-	else
-		metadata_msg[0] = '\0';
-	/* format (program):(source):[key=(key);
-	   DV;1,]counter=(counter_value);1,unit=(unit);
-	   DV;1,metadata=(metadata);DV;1:HI */
-	if (key != NULL) {
-		snprintf(str, VITAL_ENTRY_MAX_PAYLOAD,
-			"%s:%s:type=%d;DV;1,key=%s;DV;1,counter=%ld;CT;1,unit=%s;DV;1%s:HI",
-			program, source, type,
-			key, counter_value, unit,
-			metadata_msg);
-	}	else {
-		snprintf(str, VITAL_ENTRY_MAX_PAYLOAD,
-			"%s:%s:type=%d;DV;1,counter=%ld;CT;1,unit=%s;DV;1%s:HI",
-			program, source, type,
-			counter_value, unit,
-			metadata_msg);
-	}
-	log_to_vitals(priority, domain, str);
-}
-
-void log_timer_to_vitals(enum android_log_priority priority,
-			const char *domain, const char *program,
-			const char *source, const char *key,
-			long timer_value, const char *unit, vitals_type type)
-{
-	char str[VITAL_ENTRY_MAX_PAYLOAD];
-	/* format (program):(source):[key=(key);
-	   DV;1,]timer=(timer_value);1,unit=(unit);DV;1:HI */
-	if (key != NULL) {
-		snprintf(str, VITAL_ENTRY_MAX_PAYLOAD,
-			"%s:%s:type=%d;DV;1,key=%s;DV;1,timer=%ld;TI;1,unit=%s;DV;1:HI",
-			program, source, type,
-			key, timer_value, unit);
-	}	else {
-		snprintf(str, VITAL_ENTRY_MAX_PAYLOAD,
-			"%s:%s:type=%d;DV;1,timer=%ld;TI;1,unit=%s;DV;1:HI",
-			program, source, type,
-			timer_value, unit);
-	}
-	log_to_vitals(priority, domain, str);
-}
-#endif
 
 /*
  * Log size must must be a power of two, and greater than
@@ -1069,7 +985,10 @@ static int __init create_log(char *log_name, int size)
 
 	init_waitqueue_head(&log->wq);
 	INIT_LIST_HEAD(&log->readers);
-	mutex_init(&log->mutex);
+#ifdef CONFIG_AMAZON_KLOG_CONSOLE
+	log->is_mutex = strncmp(log_name, LOGGER_LOG_KERNEL, strlen(LOGGER_LOG_KERNEL));
+#endif
+	init_logger_lock(log);
 	log->w_off = 0;
 	log->head = 0;
 	log->size = size;
@@ -1107,10 +1026,10 @@ struct kmsg_write_priv {
 	struct irq_work kmsg_write_work;
 };
 
-#ifdef CONFIG_AMAZON_KLOG_CONSOLE_TRYLOCK
-static struct ring_buffer *kmsg_rng_buf;
+
 static struct logger_log *kmsg_log;
 
+#ifdef CONFIG_AMAZON_KLOG_CONSOLE_DEBUG
 static long long kmsg_delayed_count;
 static ssize_t kmsg_delayed_count_show(struct kobject *kobj,
 				  struct kobj_attribute *attr, char *buf)
@@ -1149,12 +1068,137 @@ static struct attribute_group kmsg_attr_group = {
 	.name = "kmsg",
 	.attrs = kmsg_attrs,
 };
+#endif
 
-void logger_kmsg_write_delayed(const char *log_msg, size_t len)
+/* buffer for kernel log when it cannot get semphore */
+#define KERNEL_LOG_BUF_LEN (1 << CONFIG_LOG_BUF_SHIFT)
+static char kernel_log_buf[KERNEL_LOG_BUF_LEN] __aligned(8);
+static char *klog_buf = kernel_log_buf;
+static u32 klog_buf_len = KERNEL_LOG_BUF_LEN;
+static DEFINE_RAW_SPINLOCK(klog_buf_lock);
+/* index and sequence number of the first record stored in the buffer */
+static u64 log_first_seq;
+static u32 log_first_idx;
+/* index and sequence number of the next record to store in the buffer */
+static u64 log_next_seq;
+static u32 log_next_idx;
+
+/* get record by index; idx must point to valid msg */
+static struct logger_entry *log_from_idx(u32 idx)
+{
+	struct logger_entry *msg = (struct logger_entry *)(klog_buf + idx);
+
+	/*
+	 * A length == 0 record is the end of buffer marker. Wrap around and
+	 * read the message at the start of the buffer.
+	 */
+	if (!msg->len)
+		return (struct logger_entry *)klog_buf;
+	return msg;
+}
+
+/* get next record; idx must point to valid msg */
+static u32 log_next(u32 idx)
+{
+	struct logger_entry *msg = (struct logger_entry *)(klog_buf + idx);
+
+	/* length == 0 indicates the end of the buffer; wrap */
+	/*
+	 * A length == 0 record is the end of buffer marker. Wrap around and
+	 * read the message at the start of the buffer as *this* one, and
+	 * return the one after that.
+	 */
+	if (!msg->len) {
+		msg = (struct logger_entry *)klog_buf;
+		return msg->len;
+	}
+	return idx + msg->len;
+}
+
+/*
+ * Check whether there is enough free space for the given message.
+ *
+ * The same values of first_idx and next_idx mean that the buffer
+ * is either empty or full.
+ *
+ * If the buffer is empty, we must respect the position of the indexes.
+ * They cannot be reset to the beginning of the buffer.
+ */
+static int logbuf_has_space(u32 msg_size, bool empty)
+{
+	u32 free;
+
+	if (log_next_idx > log_first_idx || empty)
+		free = max(klog_buf_len - log_next_idx, log_first_idx);
+	else
+		free = log_first_idx - log_next_idx;
+
+	/*
+	 * We need space also for an empty header that signalizes wrapping
+	 * of the buffer.
+	 */
+	return free >= msg_size + sizeof(struct logger_entry);
+}
+
+static int log_make_free_space(u32 msg_size)
+{
+	while (log_first_seq < log_next_seq) {
+		if (logbuf_has_space(msg_size, false))
+			return 0;
+		/* drop old messages until we have enough contiguous space */
+		log_first_idx = log_next(log_first_idx);
+		log_first_seq++;
+	}
+
+	/* sequence numbers are equal, so the log buffer is empty */
+	if (logbuf_has_space(msg_size, true))
+		return 0;
+
+	return -ENOMEM;
+}
+
+/* insert record into the buffer, discard old ones, update heads */
+static int logger_kmsg_drain(struct logger_entry *header, const char *text, u16 text_len)
+{
+	unsigned long flags;
+	struct logger_entry *msg;
+	u16 payload_len = min_t(size_t, text_len, LOGGER_ENTRY_MAX_PAYLOAD);
+	u32 size = payload_len + sizeof(struct logger_entry);
+	raw_spin_lock_irqsave(&klog_buf_lock, flags);
+	/* if has no space */
+	if (log_make_free_space(size)) {
+		raw_spin_unlock_irqrestore(&klog_buf_lock, flags);
+		return 0;
+	}
+	if (log_next_idx + size + sizeof(struct logger_entry) > klog_buf_len) {
+		/*
+		 * This message + an additional empty header does not fit
+		 * at the end of the buffer. Add an empty header with len == 0
+		 * to signify a wrap around.
+		 */
+		memset(klog_buf + log_next_idx, 0, sizeof(struct logger_entry));
+		log_next_idx = 0;
+	}
+	/* fill message */
+	msg = (struct logger_entry *)(klog_buf + log_next_idx);
+	msg->pid = header->pid;
+	msg->tid = header->tid;
+	msg->sec = header->sec;
+	msg->nsec = header->nsec;
+	msg->len = size; /* contains header*/
+	memcpy(klog_buf + log_next_idx + sizeof(struct logger_entry), text, payload_len);
+	/* insert message */
+	log_next_idx += size;
+	log_next_seq++;
+	raw_spin_unlock_irqrestore(&klog_buf_lock, flags);
+
+	return payload_len;
+}
+
+static void logger_kmsg_write_delayed(struct logger_entry *log_msg)
 {
 	struct logger_log *log = kmsg_log;
 	struct logger_entry header;
-	struct timespec now;
 	unsigned long count = 3;
 	size_t total_len = 0;
 	struct iovec iov[3];
@@ -1167,19 +1211,17 @@ void logger_kmsg_write_delayed(const char *log_msg, size_t len)
 	iov[1].iov_base = (void *)KERNEL_DOMAIN;
 	iov[1].iov_len  = strlen(KERNEL_DOMAIN) + 1;
 
-	iov[2].iov_base = (void *)log_msg;
-	iov[2].iov_len  = len;
+	iov[2].iov_base = (void *)((char *)log_msg + sizeof(struct logger_entry));
+	iov[2].iov_len  = log_msg->len - sizeof(struct logger_entry);
 
 	while (count-- > 0) {
 		total_len += iov[count].iov_len;
 	}
 
-	now = current_kernel_time();
-
-	header.pid = current->tgid;
-	header.tid = current->pid;
-	header.sec = now.tv_sec;
-	header.nsec = now.tv_nsec;
+	header.pid = log_msg->pid;
+	header.tid = log_msg->tid;
+	header.sec = log_msg->sec;
+	header.nsec = log_msg->nsec;
 	header.len = min_t(size_t, total_len, LOGGER_ENTRY_MAX_PAYLOAD);
 
 	/* null writes succeed, return zero */
@@ -1215,23 +1257,27 @@ void logger_kmsg_write_delayed(const char *log_msg, size_t len)
 
 static void logger_kmsg_drain_delayed(struct logger_log *log)
 {
-	int cpu = raw_smp_processor_id();
-	struct ring_buffer_event *evt;
-	const char *msg;
-	size_t len;
-
-	/* drain delayed messages */
-	while (1) {
-		/* since it is per-cpu, no locking is required */
-		evt = ring_buffer_consume(kmsg_rng_buf, cpu, NULL, NULL);
-		if (evt == NULL)
+	unsigned long flags;
+	static char kbuffer[sizeof(struct logger_log) + LOGGER_ENTRY_MAX_PAYLOAD];
+	struct logger_entry *msg;
+	for (;;) {
+		raw_spin_lock_irqsave(&klog_buf_lock, flags);
+		if (log_first_seq == log_next_seq) {
+			raw_spin_unlock_irqrestore(&klog_buf_lock, flags);
 			break;
-		msg = ring_buffer_event_data(evt);
-		len = ring_buffer_event_length(evt);
-		logger_kmsg_write_delayed(msg, len);
+		}
+
+		msg = log_from_idx(log_first_idx);
+
+		log_first_idx = log_next(log_first_idx);
+		log_first_seq++;
+
+		memcpy(kbuffer, msg, msg->len);
+		raw_spin_unlock_irqrestore(&klog_buf_lock, flags);
+
+		logger_kmsg_write_delayed((struct logger_entry *)kbuffer);
 	}
 }
-#endif
 
 static void kmsg_write_work_func(struct irq_work *irq_work)
 {
@@ -1248,8 +1294,6 @@ static DEFINE_PER_CPU(struct kmsg_write_priv, priv_data) = {
 	},
 };
 
-
-
 void logger_kmsg_write(const char *log_msg, size_t len)
 {
 	static struct logger_log *log;
@@ -1262,7 +1306,6 @@ void logger_kmsg_write(const char *log_msg, size_t len)
 	unsigned char log_level = ANDROID_LOG_INFO;
 
 	/* get the main log handler */
-#ifdef CONFIG_AMAZON_KLOG_CONSOLE_TRYLOCK
 	if (!kmsg_log) {
 		list_for_each_entry(log, &log_list, logs)
 			if (0 == strcmp(log->misc.name, LOGGER_LOG_KERNEL)) {
@@ -1275,13 +1318,6 @@ void logger_kmsg_write(const char *log_msg, size_t len)
 	}
 
 	log = kmsg_log;
-#else
-	if (!log) {
-		list_for_each_entry(log, &log_list, logs)
-			if (0 == strcmp(log->misc.name, LOGGER_LOG_KERNEL))
-				break;
-	}
-#endif
 	iov[0].iov_base = (unsigned char *)&log_level;
 	iov[0].iov_len  = 1;
 
@@ -1306,13 +1342,13 @@ void logger_kmsg_write(const char *log_msg, size_t len)
 	/* null writes succeed, return zero */
 	if (unlikely(!header.len))
 		return;
-
-#ifdef CONFIG_AMAZON_KLOG_CONSOLE_TRYLOCK
+#ifdef CONFIG_AMAZON_KLOG_CONSOLE_DEBUG
 	kmsg_total_count++;
+#endif
 
 	/*
-	 * We need to lock log->mutex here, however, we can not call
-	 * mutex_lock(&log->mutex) directly, due to the following
+	 * We need to lock log->sem here, however, we can not call
+	 * down(&log->sem) directly, due to the following
 	 * function call sequence in console_unlock():
 	 *
 	 * -> raw_spin_lock_irqsave(&logbuf_lock, flags)
@@ -1325,30 +1361,30 @@ void logger_kmsg_write(const char *log_msg, size_t len)
 	 * ...
 	 * -> local_irq_restore(flags)
 	 *
-	 * So if we call mutex_lock(&log->mutex) directly, might_sleep()
-	 * in mutex_lock() will raise in_atomic() warnings, instead, we
-	 * call mutex_trylock() to avoid that, and if we fail locking it,
-	 * we write it to a ring buffer which is stored per-cpu. We count
+	 * So if we call down(&log->sem) directly, might_sleep()
+	 * in down() will raise in_atomic() warnings, instead, we
+	 * call down_trylock() to avoid that, and if we fail locking it,
+	 * we write it to a ring buffer. We count
 	 * on the next call to logger_kmsg_write() would succeed on this
-	 * mutex_trylock() call, then we call logger_kmsg_drain_delayed()
+	 * down_trylock() call, then we call logger_kmsg_drain_delayed()
 	 * to actually drain messages in the ring buffer.
 	 */
-	if (!mutex_trylock(&log->mutex)) {
-		int ret = ring_buffer_write(kmsg_rng_buf, len, log_msg);
+	if (down_trylock(&log->sem)) {
+		int ret = logger_kmsg_drain(&header, log_msg, len);
 
-		if (ret < 0) {
+#ifdef CONFIG_AMAZON_KLOG_CONSOLE_DEBUG
+		if (!ret) {
 			kmsg_failed_count++;
-			return;
-			}
-
-		kmsg_delayed_count++;
-
+		} else {
+			kmsg_delayed_count++;
+		}
+#endif
 		return;
 	}
 
-	/* drain the delayed messages (with log->mutex locked) */
+	/* drain the delayed messages (with log->sem locked) */
 	logger_kmsg_drain_delayed(log);
-#endif
+
 	/*
 	 * Fix up any readers, pulling them forward to the first readable
 	 * entry after (what will be) the new write offset. We do this now
@@ -1375,9 +1411,7 @@ void logger_kmsg_write(const char *log_msg, size_t len)
 		total_len += len;
 	}
 
-#ifdef CONFIG_AMAZON_KLOG_CONSOLE_TRYLOCK
-	mutex_unlock(&log->mutex);
-#endif
+	logger_unlock(log);
 
 	__get_cpu_var(priv_data).log = log;
 	irq_work_queue(&(__get_cpu_var(priv_data).kmsg_write_work));
@@ -1410,12 +1444,7 @@ static int __init logger_init(void)
 	ret = create_log(LOGGER_LOG_KERNEL, __KERNEL_BUF_SIZE);
 	if (unlikely(ret))
 		goto out;
-
-#ifdef CONFIG_AMAZON_KLOG_CONSOLE_TRYLOCK
-	/* each cpu gets a PAGE_SIZE delayed klog msg buffer */
-	kmsg_rng_buf = ring_buffer_alloc(PAGE_SIZE, RB_FL_OVERWRITE);
-	if (unlikely(!kmsg_rng_buf))
-		goto out;
+#ifdef CONFIG_AMAZON_KLOG_CONSOLE_DEBUG
 	ret = sysfs_create_group(kernel_kobj, &kmsg_attr_group);
 	if (ret)
 		goto out;
@@ -1472,9 +1501,9 @@ int panic_dump_main(char *buf, size_t size) {
     log_main.head = 0;
     log_main.w_off = 0;
 	list_for_each_entry(log, &log_list, logs)
-		if (strncmp(log->misc.name, LOGGER_LOG_MAIN, strlen(LOGGER_LOG_MAIN)) == 0) 
+		if (strncmp(log->misc.name, LOGGER_LOG_MAIN, strlen(LOGGER_LOG_MAIN)) == 0)
             log_main = *log;
-	
+
 	if (isFirst == 0){
 		offset = log_main.head;
 		isFirst++;
@@ -1507,7 +1536,7 @@ int panic_dump_events(char *buf, size_t size) {
     log_events.head = 0;
     log_events.w_off = 0;
 	list_for_each_entry(log, &log_list, logs)
-		if (strncmp(log->misc.name, LOGGER_LOG_EVENTS, strlen(LOGGER_LOG_EVENTS)) == 0) 
+		if (strncmp(log->misc.name, LOGGER_LOG_EVENTS, strlen(LOGGER_LOG_EVENTS)) == 0)
             log_events = *log;
 
 	if (isFirst == 0){
@@ -1519,7 +1548,7 @@ int panic_dump_events(char *buf, size_t size) {
 	if(distance > size)
 		realsize = size;
 	else
-		realsize = distance;	
+		realsize = distance;
 	len = min(realsize, log_events.size - offset);
 	memcpy(buf, log_events.buffer + offset, len);
 	if (realsize != len)
@@ -1542,7 +1571,7 @@ int panic_dump_radio(char *buf, size_t size) {
     log_radio.head = 0;
     log_radio.w_off = 0;
 	list_for_each_entry(log, &log_list, logs)
-		if (strncmp(log->misc.name, LOGGER_LOG_RADIO, strlen(LOGGER_LOG_RADIO)) == 0) 
+		if (strncmp(log->misc.name, LOGGER_LOG_RADIO, strlen(LOGGER_LOG_RADIO)) == 0)
             log_radio = *log;
 
 	if (isFirst == 0){
@@ -1577,9 +1606,9 @@ int panic_dump_system(char *buf, size_t size) {
     log_system.head = 0;
     log_system.w_off = 0;
 	list_for_each_entry(log, &log_list, logs)
-		if (strncmp(log->misc.name, LOGGER_LOG_SYSTEM, strlen(LOGGER_LOG_SYSTEM)) == 0) 
+		if (strncmp(log->misc.name, LOGGER_LOG_SYSTEM, strlen(LOGGER_LOG_SYSTEM)) == 0)
             log_system = *log;
-	
+
 	if (isFirst == 0){
 		offset = log_system.head;
 		isFirst++;
@@ -1625,7 +1654,7 @@ int panic_dump_android_log(char *buf, size_t size, int type)
     }
     if (ret!=0)
 	    ret = size;
-	
+
     return ret;
 }
 

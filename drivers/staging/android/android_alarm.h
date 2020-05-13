@@ -32,7 +32,6 @@ enum android_alarm_type {
 	ANDROID_ALARM_SYSTEMTIME,
 	ANDROID_ALARM_POWER_ON,
 	ANDROID_ALARM_TYPE_COUNT,
-
 	ANDROID_ALARM_POWER_ON_LOGO = 7,
 	/* return code bit numbers */
 	/* ANDROID_ALARM_TIME_CHANGE = 16 */

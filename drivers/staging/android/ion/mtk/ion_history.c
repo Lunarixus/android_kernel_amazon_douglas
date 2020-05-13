@@ -9,7 +9,6 @@
 #include <linux/vmalloc.h>
 #include "ion_priv.h"
 #include <linux/slab.h>
-#include <linux/xlog.h>
 #ifdef CONFIG_MTK_M4U
 #include <m4u.h>
 #endif

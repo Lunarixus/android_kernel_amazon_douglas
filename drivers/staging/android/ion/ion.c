@@ -15,7 +15,6 @@
  *
  */
 
-#include <linux/atomic.h>
 #include <linux/device.h>
 #include <linux/atomic.h>
 #include <linux/err.h>
@@ -431,8 +430,7 @@ static void ion_handle_get(struct ion_handle *handle)
 }
 
 /* Must hold the client lock */
-static struct ion_handle *ion_handle_get_check_overflow(
-					struct ion_handle *handle)
+static struct ion_handle* ion_handle_get_check_overflow(struct ion_handle *handle)
 {
 	if (atomic_read(&handle->ref.refcount) + 1 == 0)
 		return ERR_PTR(-EOVERFLOW);
@@ -1426,6 +1424,7 @@ struct ion_handle *ion_import_dma_buf(struct ion_client *client, int fd)
 	handle = ion_handle_create(client, buffer);
 	if (IS_ERR(handle)) {
 		mutex_unlock(&client->lock);
+		IONMSG("%s handle is error 0x%p.\n", __func__, handle);
 		goto end;
 	}
 
